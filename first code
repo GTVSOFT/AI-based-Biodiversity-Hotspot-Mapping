@@ -1,0 +1,71 @@
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+import rasterio
+from rasterio.plot import show
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+# Load environmental raster layers (e.g., NDVI, Elevation, Temperature)
+def load_raster_as_array(filepath):
+    with rasterio.open(filepath) as src:
+        data = src.read(1)
+        transform = src.transform
+        return data, transform
+
+# Paths to raster data (replace with your raster layers)
+ndvi_data, ndvi_transform = load_raster_as_array('ndvi.tif')
+elevation_data, elevation_transform = load_raster_as_array('elevation.tif')
+temperature_data, temp_transform = load_raster_as_array('temperature.tif')
+
+# Stack raster data into features (assume same shape and alignment)
+X_stack = np.stack([ndvi_data.flatten(), elevation_data.flatten(), temperature_data.flatten()], axis=1)
+
+# Load species richness points
+species_gdf = gpd.read_file('species_richness_points.shp')  # must have 'richness' column
+
+# Extract raster values at species points
+def extract_raster_values(raster, points, transform):
+    rows, cols = rasterio.transform.rowcol(transform, points.geometry.x, points.geometry.y)
+    return raster[rows, cols]
+
+species_gdf['ndvi'] = extract_raster_values(ndvi_data, species_gdf, ndvi_transform)
+species_gdf['elevation'] = extract_raster_values(elevation_data, species_gdf, elevation_transform)
+species_gdf['temperature'] = extract_raster_values(temperature_data, species_gdf, temp_transform)
+
+# Prepare data
+features = species_gdf[['ndvi', 'elevation', 'temperature']]
+target = species_gdf['richness']
+
+# Train/Test split
+X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=0.2, random_state=42)
+
+# Train Random Forest Regressor
+model = RandomForestRegressor(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
+
+# Predict biodiversity richness over the entire raster area
+predictions = model.predict(X_stack)
+predictions_raster = predictions.reshape(ndvi_data.shape)
+
+# Save predictions as a new raster
+new_raster_meta = {
+    'driver': 'GTiff',
+    'height': predictions_raster.shape[0],
+    'width': predictions_raster.shape[1],
+    'count': 1,
+    'dtype': 'float32',
+    'crs': rasterio.open('ndvi.tif').crs,
+    'transform': ndvi_transform
+}
+
+with rasterio.open('biodiversity_hotspots.tif', 'w', **new_raster_meta) as dst:
+    dst.write(predictions_raster.astype('float32'), 1)
+
+# Visualize
+plt.figure(figsize=(10, 8))
+plt.title('Predicted Biodiversity Hotspots')
+plt.imshow(predictions_raster, cmap='viridis')
+plt.colorbar(label='Predicted Species Richness')
+plt.show()
